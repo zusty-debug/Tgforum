@@ -21,23 +21,22 @@ if [ ! -s "$DB_PATH" ]; then
     echo "    restored from repo copy (real LFS file)"
   elif [ -s "data/archive.db" ] && is_pointer "data/archive.db"; then
     echo "    repo copy is an LFS pointer — trying git lfs pull…"
-    if command -v git-lfs >/dev/null 2>&1 && git lfs pull -- "data/archive.db" 2>/dev/null; then
+    if command -v git-lfs >/dev/null 2>&1 && git lfs pull --include="data/archive.db" 2>/dev/null; then
       cp "data/archive.db" "$DB_PATH"
       echo "    restored via git lfs pull"
     else
-      # Last resort: download the blob straight from the GitHub API using the
-      # token embedded in GIT_PUSH_URL (which the push loop needs anyway).
-      TOK="$(printf '%s' "${GIT_PUSH_URL:-}" | sed -n 's#.*x-access-token:\([^@]*\)@.*#\1#p')"
-      OID="$(sed -n 's/^oid sha256:\(.*\)$/\1/p' "data/archive.db" | head -1)"
-      if [ -n "$TOK" ] && [ -n "$OID" ]; then
-        REPO_PATH="$(printf '%s' "${GIT_PUSH_URL:-}" | sed -n 's#.*github.com/\(.*\)\.git$#\1#p')"
-        if [ -n "$REPO_PATH" ] && curl -fsSL \
-            -H "Authorization: token $TOK" \
-            "https://api.github.com/repos/$REPO_PATH/git/blobs/$OID" \
-            -H "Accept: application/vnd.github.raw+json" \
-            --output "$DB_PATH"; then
-          echo "    restored via GitHub API direct download"
+      # Last resort: sparse partial-clone just the DB file (LFS) using the
+      # token URL in GIT_PUSH_URL (which the push loop needs anyway).
+      if [ -n "${GIT_PUSH_URL:-}" ] && command -v git-lfs >/dev/null 2>&1; then
+        TDIR="$(mktemp -d)"
+        if git clone -q --depth 1 --filter=blob:none --sparse "$GIT_PUSH_URL" "$TDIR" 2>/dev/null \
+           && ( cd "$TDIR" && git sparse-checkout set data 2>/dev/null \
+                && git lfs pull --include="data/archive.db" 2>/dev/null \
+                && [ -s data/archive.db ] && ! is_pointer "data/archive.db" ); then
+          cp "$TDIR/data/archive.db" "$DB_PATH"
+          echo "    restored via sparse LFS clone"
         fi
+        rm -rf "$TDIR"
       fi
     fi
   fi
