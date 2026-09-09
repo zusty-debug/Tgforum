@@ -306,14 +306,34 @@ def cmd_review(cfg: dict, db: DB, limit: int) -> int:
 
 def cmd_approve(cfg: dict, db: DB, rid: int, action: str, name: str | None) -> int:
     it = db.get_review_item(rid)
-    if not it:
-        print(f"No review item #{rid}")
-        return 1
+    if it is not None:
+        # A number can be BOTH a review-item id and a group id (old Saved
+        # Messages notes printed the group id). Exact item id wins, but say
+        # loudly which group it acts on so a mismatch is visible.
+        alt = db.review_item_for_group(rid)
+        _glive = db.group_live(it["logical_group_id"])
+        gname = _glive["canonical_name"] if _glive is not None else "?"
+        if (alt is not None and alt["id"] != it["id"]
+                and it["logical_group_id"] != rid):
+            print(f"⚠  using review item #{it['id']} → group {it['logical_group_id']} "
+                  f"'{gname}'")
+            print(f"   {rid} is ALSO a group id (its item is #{alt['id']}). If you "
+                  f"meant that one: main.py approve {alt['id']} --action {action}"
+                  + (f' --name "{name}"' if name else ""))
+    else:
+        # No item with this id → interpret as a GROUP id (old-note format).
+        it = db.review_item_for_group(rid)
+        if not it:
+            print(f"No review item #{rid} (and none for group #{rid})")
+            return 1
+        print(f"  (id {rid} is a group id → using review item #{it['id']})")
     gid = it["logical_group_id"]
     if action in ("accept", "rename"):
         if gid:
             db.set_group_status(gid, "OK", name=name)
-            print(f"✔ group approved" + (f" as '{name}'" if name else ""))
+            live = db.group_live(gid)
+            print(f"✔ group {gid} '{live['canonical_name']}' approved"
+                  + (f" as '{name}'" if name else ""))
         db.set_review_status(rid, "APPROVED", action)
     elif action == "ignore":
         if gid:

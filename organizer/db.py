@@ -387,3 +387,29 @@ class DB:
             "SELECT DISTINCT msg_id FROM sync_queue_members"
             " WHERE file_id GLOB '[0-9]*' ORDER BY 1")
         return [r["msg_id"] for r in rows]
+
+    # ── live group state (mid-run admin approvals) ─────────────
+    def group_live(self, gid: int):
+        """Current status/name of one group (indexed, one row)."""
+        return self.conn.execute(
+            "SELECT canonical_name, normalized_name, country,"
+            " country_confidence, is_multipart, status"
+            " FROM logical_groups WHERE id=?", (gid,)).fetchone()
+
+    def group_filenames(self, gid: int) -> list[str]:
+        rows = self.conn.execute(
+            "SELECT sm.filename FROM source_messages sm"
+            " JOIN group_members gm ON gm.source_message_id = sm.source_message_id"
+            " WHERE gm.logical_group_id=?", (gid,))
+        return [r["filename"] or "" for r in rows]
+
+    def review_item_for_group(self, gid: int):
+        """The review item an admin approves via the Saved Messages note."""
+        row = self.conn.execute(
+            "SELECT * FROM review_items WHERE logical_group_id=?"
+            " AND kind='grouping' ORDER BY id LIMIT 1", (gid,)).fetchone()
+        if row is None:
+            row = self.conn.execute(
+                "SELECT * FROM review_items WHERE logical_group_id=?"
+                " ORDER BY id LIMIT 1", (gid,)).fetchone()
+        return row

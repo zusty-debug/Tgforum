@@ -20,10 +20,26 @@ import zlib
 
 from telethon import errors
 
-from ..planner import topic_icon
+from ..models import CountryResult
+from ..planner import Planner, topic_icon
 from .topics import ensure_topic
 
 log = logging.getLogger("organizer.telegram")
+
+
+class _LiveGroup:
+    """Minimal group object for title derivation from one DB row."""
+    __slots__ = ("name", "norm", "is_multipart", "country", "domain", "members")
+
+    def __init__(self, row, filenames: list[str]):
+        self.name = row["canonical_name"]
+        self.norm = row["normalized_name"] or ""
+        self.is_multipart = bool(row["is_multipart"])
+        self.country = (CountryResult(None, row["country"],
+                                      row["country_confidence"] or 0.0, [])
+                        if row["country"] else None)
+        self.domain = None
+        self.members = [type("M", (), {"filename": f})() for f in filenames]
 
 # msg_id -> resolved media (Document/Photo). The SAME source message is
 # copied to all 3 dumps, so each one should be looked up only ONCE.
@@ -346,6 +362,9 @@ class SyncWorker:
         self.done = 0
         self.failed = 0
         self.skipped = 0
+        # Cheap (config-only) planner instance — used to re-derive the
+        # topic title of groups an admin approved AFTER the queue was built.
+        self._planner = Planner(self.cfg)
 
     # ── retry wrapper ───────────────────────────────────────────
     async def _with_retry(self, fn, what: str):
@@ -391,10 +410,40 @@ class SyncWorker:
             log.info("[%s] batch prefetch armed for %d source messages",
                      self.archive["id"], n)
         for v in self.views:
+            if self._apply_live_state(v):
+                continue
             if v["to_saved"]:
                 await self._sync_saved(v)
             elif v["topic_title"]:
                 await self._sync_group(v)
+
+    def _apply_live_state(self, v: dict) -> bool:
+        """Pick up admin approvals made after the queue was built.
+
+        Only views planned as review-saved can change destination mid-run
+        (everything else in the queue already matches the group's state).
+        Returns True when the group was ignored by the admin → skip it.
+        """
+        if not v["to_saved"]:
+            return False
+        row = self.db.group_live(v["gid"])
+        if row is None:
+            return False
+        status = row["status"]
+        if status == "IGNORED":
+            log.info("[%s] group %s ignored by admin — skipping",
+                     self.archive["id"], v["gid"])
+            return True
+        if status != "OK":
+            return False
+        live = _LiveGroup(row, self.db.group_filenames(v["gid"]))
+        title, kind = self._planner.live_title(live)
+        v["to_saved"] = False
+        v["topic_title"] = title
+        v["kind"] = kind
+        log.info("[%s] group %s approved after queue build → topic '%s'",
+                 self.archive["id"], v["gid"], title)
+        return False
         log.info("[%s] pass complete: %d copied, %d skipped-already-done, %d failed",
                  self.archive["id"], self.done, self.skipped, self.failed)
 
@@ -511,9 +560,13 @@ class SyncWorker:
                 log.error("[%s] cannot resolve 'me' for saved review: %s", arch, e)
                 return
         me = self._me
+        # the approve command must reference the REVIEW ITEM id — never the
+        # group id (different sequences; a group id can be another item's id)
+        it = self.db.review_item_for_group(v["gid"])
+        rid = it["id"] if it is not None else v["gid"]
         note = (f"🔎 REVIEW — {v['name']} (confidence {v['confidence']:.2f})\n"
                 f"Reason: {v['review_reason'] or 'unresolvable — needs admin decision'}\n"
-                f"Approve: python main.py approve {v['gid']} --action accept")
+                f"Approve: python main.py approve {rid} --action accept")
         for m in v["members"]:
             job = self.db.ensure_job(arch, m["msg_id"], "REVIEW_SAVED", v["gid"],
                                      "Saved Messages")

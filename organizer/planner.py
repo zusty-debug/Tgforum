@@ -213,6 +213,20 @@ class Planner:
             return self._safe_title(dname, 60), "domain"
         return self.misc, "misc"
 
+    def live_title(self, g) -> tuple[str, str]:
+        """Destination for a group approved AFTER the queue was built.
+
+        Mirrors plan()'s non-REVIEW logic, so a mid-run `main.py approve`
+        (accept/rename) lands files in the right topic — renaming to an
+        existing topic's exact title merges into that topic (no duplicate
+        topic is ever created).
+        """
+        if self._is_ulp(g):
+            return self.ulp_name, "ulp"
+        if g.is_multipart:
+            return self._safe_title(g.name), "dataset"
+        return self._single_file_title(g)
+
     def _safe_title(self, title: str, maxlen: int | None = None) -> str:
         t = re.sub(r"[\x00-\x1f\x7f]", " ", title or "").strip()
         t = re.sub(r"\s+", " ", t)
