@@ -19,6 +19,30 @@ REPO_ROOT="$(pwd)"
 mkdir -p "$(dirname "$DB_PATH")"
 is_pointer() { head -c 60 "$1" 2>/dev/null | grep -q "git-lfs"; }
 
+# ── 1b. Auto-replace pre-streaming DBs (no manual shell step needed) ──────
+# A DB without sync_queue rows predates the low-memory streaming plan and is
+# exactly what OOM-killed the 0.15GB container (in-memory plan = ~200MB).
+# Safe: a current DB always carries 77,911 queue rows, so "queue empty"
+# can only mean "old DB". Progress jobs live in the fresh DB too (it was
+# pushed from the same source of truth), so resume position is preserved.
+queue_rows() {
+  python3 -c '
+import sqlite3, sys
+try:
+    con = sqlite3.connect(sys.argv[1])
+    print(con.execute("SELECT COUNT(*) FROM sync_queue").fetchone()[0])
+except Exception:
+    print(0)
+' "$1" 2>/dev/null || echo 0
+}
+if [ -s "$DB_PATH" ] && ! is_pointer "$DB_PATH"; then
+  QROWS="$(queue_rows "$DB_PATH")"
+  if [ "${QROWS:-0}" -eq 0 ] 2>/dev/null; then
+    echo "── DB outdated (no sync_queue rows — pre-streaming DB) — replacing with the bundled one ──"
+    rm -f "$DB_PATH" "$DB_PATH-wal" "$DB_PATH-shm"
+  fi
+fi
+
 if [ ! -s "$DB_PATH" ]; then
   echo "── DB bootstrap: $DB_PATH missing ───────────────────────"
   restored=""
