@@ -146,15 +146,35 @@ def _status_refresher():
 
 
 # ── Web login: phone → OTP code → (2FA password) → session file on volume ──
+# (telethon is imported LAZILY on first /auth visit — keeps the dashboard's
+# RAM down on the 0.15GB free tier when nobody is logging in)
 _AUTH = {"state": "idle", "error": "", "info": "", "client": None,
          "loop": None, "lock": threading.Lock()}
+_AUTH_READY = threading.Event()
 
 
 def _auth_loop_thread():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
-    _AUTH["loop"] = loop
+    with _AUTH["lock"]:
+        _AUTH["loop"] = loop
+    _AUTH_READY.set()
     loop.run_forever()
+
+
+def _ensure_auth_loop():
+    """Start the auth loop on first use. Returns an error string or None."""
+    if not os.environ.get("TELEGRAM_API_ID") or not os.environ.get("TELEGRAM_API_HASH"):
+        return "TELEGRAM_API_ID / TELEGRAM_API_HASH not set"
+    if _AUTH["loop"] is not None:
+        return None
+    try:
+        import telethon  # noqa: F401
+    except ImportError:
+        return "telethon is not installed in this image"
+    threading.Thread(target=_auth_loop_thread, daemon=True).start()
+    _AUTH_READY.wait(15)
+    return None
 
 
 def _auth_run(coro, timeout=150):
@@ -478,6 +498,10 @@ class H(BaseHTTPRequestHandler):
             if "back" in self.path:          # "change phone number"
                 with _AUTH["lock"]:
                     _AUTH.update(state="idle", error="", info="", client=None)
+            err = _ensure_auth_loop()
+            if err and _AUTH["state"] == "idle" and not _AUTH["error"]:
+                with _AUTH["lock"]:
+                    _AUTH.update(error=err)
             self._send(200, _auth_html(), "text/html; charset=utf-8")
         else:
             self._send(404, json.dumps({"error": "not found"}))
@@ -486,6 +510,15 @@ class H(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if not path.startswith("/auth/"):
             self._send(404, json.dumps({"error": "not found"}))
+            return
+        err = _ensure_auth_loop()
+        if err:
+            with _AUTH["lock"]:
+                _AUTH.update(error=err)
+            self.send_response(303)
+            self.send_header("Location", "/auth")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
             return
         try:
             length = int(self.headers.get("Content-Length", 0) or 0)
@@ -536,14 +569,7 @@ def main():
     t.start()
     if EMBED_STATUS:
         threading.Thread(target=_status_refresher, daemon=True).start()
-    # web login (phone → OTP) — enabled when Telegram credentials are present
-    if os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH"):
-        try:
-            import telethon  # noqa: F401
-            threading.Thread(target=_auth_loop_thread, daemon=True).start()
-            _log(f"web login enabled → /auth (session file: {SESSION_NAME}.session)")
-        except ImportError:
-            _log("telethon not installed — /auth disabled")
+    _log(f"web login available → /auth (lazy: session file {SESSION_NAME}.session)")
     # immediate first load so the page isn't empty on cold start
     _refresh_once()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), H)

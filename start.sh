@@ -63,12 +63,9 @@ echo "── DB ready: $DB_PATH ($(du -h "$DB_PATH" | cut -f1)) — sync will re
 mkdir -p logs out
 up() { pgrep -f "$1" >/dev/null 2>&1; }
 
-# status writer → out/progress.json. When the dashboard runs in the same
-# container (EMBED_STATUS=1) it renders this itself — don't double-render.
-if [ "${EMBED_STATUS:-0}" != "1" ] && ! up "scripts/status_fi[l]e.py"; then
-  ( setsid nohup python3 -u scripts/status_file.py >> logs/status_file.log 2>&1 & )
-  echo "── status writer started (out/progress.json every ~25s) ──"
-fi
+# NOTE: no separate status writer here — the dashboard below runs with
+# EMBED_STATUS=1 and renders out/progress.json itself (saves ~40MB of RAM
+# on the free tier).
 
 # git push loop → keeps the repo's progress.json fresh (only when the image
 # actually contains a git repo)
@@ -108,9 +105,17 @@ fi
 
 # ── 4. The pipeline (foreground — platform sees its logs) ──────────────────
 echo "── scan (incremental) ─────────────────────────────"
-python main.py scan
-echo "── classify ────────────────────────────────────────"
-python main.py classify
+scan_log="$(python main.py scan 2>&1)"
+printf '%s\n' "$scan_log"
+new_files="$(printf '%s' "$scan_log" | grep -oE "Scanned [0-9]+ new files" | grep -oE "[0-9]+" | tail -1)"
+new_files="${new_files:-0}"
+groups="$(python3 -c "import sqlite3,os; con=sqlite3.connect(os.environ.get('DB_PATH') or 'data/archive.db'); print(con.execute('SELECT COUNT(*) FROM logical_groups').fetchone()[0])" 2>/dev/null || echo 0)"
+if [ "$new_files" = "0" ] && [ "${groups:-0}" -gt 0 ]; then
+  echo "── classify SKIPPED ($groups groups already in DB, 0 new files — saves the RAM spike) ──"
+else
+  echo "── classify ────────────────────────────────────────"
+  python main.py classify
+fi
 echo "── sync-seq (one dump at a time, resumes from checkpoint) ────"
 python main.py sync-seq
 echo "── rebuild-index ───────────────────────────────────"

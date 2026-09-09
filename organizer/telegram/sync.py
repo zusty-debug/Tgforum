@@ -32,7 +32,7 @@ resolve_cache: dict[int, object] = {}
 # Memory cap for the reference cache (free-tier containers get ~256MB total):
 # copies are processed in ascending msg_id order, so old ids are never
 # referenced again — evict the oldest half once the cap is exceeded.
-_RESOLVE_CACHE_CAP = int(os.environ.get("RESOLVE_CACHE_CAP", "8000"))
+_RESOLVE_CACHE_CAP = int(os.environ.get("RESOLVE_CACHE_CAP", "4000"))
 
 
 def _trim_resolve_cache() -> None:
