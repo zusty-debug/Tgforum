@@ -199,7 +199,7 @@ async def _auth_send_code(phone: str):
             pass
         raise
     with _AUTH["lock"]:
-        _AUTH.update(client=client, state="code_sent", error="",
+        _AUTH.update(client=client, phone=phone, state="code_sent", error="",
                      info=f"code sent to {phone}")
 
 
@@ -208,24 +208,29 @@ async def _auth_sign_in(step: str, value: str):
     client = _AUTH["client"]
     if client is None:
         raise RuntimeError("no login in progress — start again with your phone number")
+    phone = _AUTH.get("phone", "")
     try:
         if step == "code":
-            await client.sign_in_phone_code(value)
+            await client.sign_in(phone, value)
         else:
-            await client.sign_in_password(value)
+            await client.sign_in(password=value)
         me = await client.get_me()
         await _auth_mark_finished(client, me.first_name or str(me.id))
+    except terrors.SessionPasswordNeededError:
+        with _AUTH["lock"]:
+            _AUTH.update(state="need_password", error="",
+                         info="This account has 2FA on — enter your cloud password")
     except terrors.PasswordHashInvalidError:
-        if step == "code":
-            with _AUTH["lock"]:
-                _AUTH.update(state="need_password", error="",
-                             info="This account has 2FA on — enter your cloud password")
-        else:
-            with _AUTH["lock"]:
-                _AUTH.update(state="need_password", error="Wrong cloud password — try again")
+        with _AUTH["lock"]:
+            _AUTH.update(state="need_password", error="Wrong cloud password — try again")
     except terrors.PhoneCodeInvalidError:
         with _AUTH["lock"]:
-            _AUTH.update(state="code_sent", error="That code wasn't right — enter the latest code Telegram sent")
+            _AUTH.update(state="code_sent",
+                         error="That code wasn't right — enter the latest code Telegram sent")
+    except terrors.PhoneCodeExpiredError:
+        with _AUTH["lock"]:
+            _AUTH.update(state="idle", client=None, info="",
+                         error="That code expired (they last ~10 min) — request a fresh one")
     except terrors.PhoneCodeEmptyError:
         with _AUTH["lock"]:
             _AUTH.update(state="code_sent", error="Code field was empty — enter the 5-digit code")
@@ -262,7 +267,11 @@ def _auth_html() -> str:
                     '<p>Go back to <a class="a" href="/">/</a> to watch progress.</p>')
     if state == "code_sent":
         body = ('<h1>📲 Enter the code</h1>'
-                f'<p>{info}</p>')
+                f'<p>{info}<br><br>Find it in <b>Telegram</b>: a new chat from the official '
+                '<b>"Telegram" account</b> (top of your chat list, purple icon). '
+                'If nothing arrives in a few minutes, also check your <b>SMS</b> inbox.<br><br>'
+                '⚠️ Codes expire after ~10 minutes and Telegram rate-limits repeated '
+                'requests — enter the new code, don\'t re-request several times.</p>')
         if err:
             body += f'<div class="err">{err}</div>'
         body += ('<form method="POST" action="/auth/code">'
