@@ -93,8 +93,8 @@ def sync_alive() -> bool:
                 cmd = f.read().decode(errors="ignore")
         except OSError:
             continue
-            if ("sync-all" in cmd or "sync-seq" in cmd) and ("python" in cmd or "main.py" in cmd):
-                return True
+        if ("sync-all" in cmd or "sync-seq" in cmd) and ("python" in cmd or "main.py" in cmd):
+            return True
     return False
 
 
