@@ -29,6 +29,18 @@ log = logging.getLogger("organizer.telegram")
 # Entries are small InputDocument-ish metadata objects.
 resolve_cache: dict[int, object] = {}
 
+# Memory cap for the reference cache (free-tier containers get ~256MB total):
+# copies are processed in ascending msg_id order, so old ids are never
+# referenced again — evict the oldest half once the cap is exceeded.
+_RESOLVE_CACHE_CAP = int(os.environ.get("RESOLVE_CACHE_CAP", "8000"))
+
+
+def _trim_resolve_cache() -> None:
+    if len(resolve_cache) <= _RESOLVE_CACHE_CAP:
+        return
+    for k in sorted(resolve_cache)[: _RESOLVE_CACHE_CAP // 2]:
+        resolve_cache.pop(k, None)
+
 # ── batch prefetch for numeric file_ids ─────────────────────────────
 # Source file_ids are internal numeric ids → each one normally needs a
 # get_messages lookup. Instead of 91,935 one-by-one calls, we fetch the
@@ -139,6 +151,7 @@ async def ensure_prefetched(client, src_chat_id: int, target: int,
                 doc = getattr(media, "document", None) or getattr(media, "photo", None)
                 if doc is not None:
                     resolve_cache[msg.id] = doc
+            _trim_resolve_cache()
             _prefetch["up_to"] = max(_prefetch["up_to"], batch[-1])
 
 
@@ -208,6 +221,7 @@ async def get_payload(worker: "SyncWorker", m: dict) -> object:
         doc = getattr(media, "document", None) or getattr(media, "photo", None)
         if doc is not None:
             resolve_cache[msg.id] = doc
+    _trim_resolve_cache()
     cached = resolve_cache.get(m["msg_id"])
     if cached is None:
         raise RuntimeError(f"no media in source message {m['msg_id']}")

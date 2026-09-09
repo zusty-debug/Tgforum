@@ -17,11 +17,14 @@ Env:
 
 Run:  python3 app.py
 """
+import asyncio
 import json
 import os
+import re
 import subprocess
 import threading
 import time
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT = int(os.environ.get("PORT", "10000"))
@@ -31,6 +34,12 @@ GIT_REPO = os.environ.get("GIT_REPO", "").strip()
 GIT_TOKEN = os.environ.get("GIT_TOKEN", "").strip()
 GIT_BRANCH = os.environ.get("GIT_BRANCH", "main").strip() or "main"
 WORKDIR = os.environ.get("REPO_DIR", "/tmp/progress-repo") or "/tmp/progress-repo"
+EMBED_STATUS = os.environ.get("EMBED_STATUS", "").strip() == "1"
+
+# Session file base (Telethon appends ".session"); must match start.sh /
+# organizer.telegram.client.session_target().
+SESSION_NAME = (os.environ.get("SESSION_FILE", "").strip()
+                or ("/data/tg_sess" if os.path.isdir("/data") else "organizer_session"))
 
 _lock = threading.Lock()
 _STATE = {"progress": None, "mode": None, "error": None, "last_update": None}
@@ -112,6 +121,178 @@ def _updater():
     while True:
         _refresh_once()
         time.sleep(REFRESH)
+
+
+# ── Embedded progress renderer (single-container mode) ─────────────────────
+def _status_refresher():
+    """Render out/progress.json (+ DASHBOARD.md) every 25s straight from the
+    DB — replaces the separate status_file.py process when the dashboard and
+    the sync live in the same container (keeps RAM down on the free tier)."""
+    import sys
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    sys.path.insert(0, os.path.join(root, "scripts"))
+    try:
+        import status_file as SF
+    except Exception as e:
+        _log(f"embedded status disabled: {e}")
+        return
+    _log("embedded status renderer on (progress.json every 25s)")
+    while True:
+        try:
+            SF.render()
+        except Exception as e:
+            _log(f"status render error: {e}")
+        time.sleep(25)
+
+
+# ── Web login: phone → OTP code → (2FA password) → session file on volume ──
+_AUTH = {"state": "idle", "error": "", "info": "", "client": None,
+         "loop": None, "lock": threading.Lock()}
+
+
+def _auth_loop_thread():
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    _AUTH["loop"] = loop
+    loop.run_forever()
+
+
+def _auth_run(coro, timeout=150):
+    fut = asyncio.run_coroutine_threadsafe(coro, _AUTH["loop"])
+    return fut.result(timeout=timeout)
+
+
+async def _auth_mark_finished(client, who: str):
+    try:
+        client.session.save()          # persist the auth key NOW
+    except Exception:
+        pass
+    try:
+        os.makedirs(os.path.dirname(SESSION_NAME) or ".", exist_ok=True)
+        with open(os.path.join(os.path.dirname(SESSION_NAME) or ".", "session_ready"), "w") as f:
+            f.write(json.dumps({"who": who, "ts": int(time.time())}))
+    except Exception:
+        pass
+    await client.disconnect()
+    with _AUTH["lock"]:
+        _AUTH.update(state="done", client=None, error="",
+                     info=f"logged in as {who} — session saved. The sync starts within ~10s.")
+
+
+async def _auth_send_code(phone: str):
+    from telethon import TelegramClient
+    api_id = int(os.environ["TELEGRAM_API_ID"])
+    api_hash = os.environ["TELEGRAM_API_HASH"]
+    client = TelegramClient(SESSION_NAME, api_id, api_hash,
+                            system_version="Linux", device_model="ArchiveOrganizer")
+    try:
+        await client.connect()
+        if await client.is_user_authorized():
+            me = await client.get_me()
+            await _auth_mark_finished(client, me.first_name or str(me.id))
+            return
+        await client.send_code_request(phone)
+    except Exception:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+        raise
+    with _AUTH["lock"]:
+        _AUTH.update(client=client, state="code_sent", error="",
+                     info=f"code sent to {phone}")
+
+
+async def _auth_sign_in(step: str, value: str):
+    from telethon import errors as terrors
+    client = _AUTH["client"]
+    if client is None:
+        raise RuntimeError("no login in progress — start again with your phone number")
+    try:
+        if step == "code":
+            await client.sign_in_phone_code(value)
+        else:
+            await client.sign_in_password(value)
+        me = await client.get_me()
+        await _auth_mark_finished(client, me.first_name or str(me.id))
+    except terrors.PasswordHashInvalid:
+        if step == "code":
+            with _AUTH["lock"]:
+                _AUTH.update(state="need_password", error="",
+                             info="This account has 2FA on — enter your cloud password")
+        else:
+            with _AUTH["lock"]:
+                _AUTH.update(state="need_password", error="Wrong cloud password — try again")
+    except terrors.PhoneCodeInvalid:
+        with _AUTH["lock"]:
+            _AUTH.update(state="code_sent", error="That code wasn't right — enter the latest code Telegram sent")
+    except terrors.PhoneCodeEmpty:
+        with _AUTH["lock"]:
+            _AUTH.update(state="code_sent", error="Code field was empty — enter the 5-digit code")
+    except terrors.FloodWaitError as e:
+        with _AUTH["lock"]:
+            _AUTH.update(error=f"Telegram rate limit — wait {e.seconds}s and try again")
+
+
+def _auth_html() -> str:
+    with _AUTH["lock"]:
+        state, err, info = _AUTH["state"], _AUTH["error"], _AUTH["info"]
+
+    def card(body):
+        return (f'<!doctype html><html><head><meta charset="utf-8">'
+                f'<meta name="viewport" content="width=device-width,initial-scale=1">'
+                f'<title>Archive Sync — Login</title><style>'
+                f'body{{background:#0b1020;color:#e8ecf5;font-family:system-ui,sans-serif;'
+                f'margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:16px}}'
+                f'.c{{background:#131a2e;border:1px solid #232d4a;border-radius:14px;padding:26px;max-width:400px;width:100%}}'
+                f'h1{{font-size:20px;margin:0 0 6px}}p{{color:#8b96ad;font-size:14px;line-height:1.45}}'
+                f'input{{width:100%;box-sizing:border-box;padding:12px;border-radius:10px;border:1px solid #2b3757;'
+                f'background:#0f1526;color:#e8ecf5;font-size:16px;margin:10px 0}}'
+                f'button{{width:100%;padding:12px;border:0;border-radius:10px;background:#3b82f6;color:#fff;'
+                f'font-size:16px;font-weight:600;cursor:pointer}}'
+                f'.err{{background:#2f0e14;border:1px solid #7f1d1d;color:#f87171;padding:10px 12px;'
+                f'border-radius:10px;font-size:14px}}.ok{{background:#0e2f22;border:1px solid #14532d;'
+                f'color:#4ade80;padding:10px 12px;border-radius:10px;font-size:14px}}'
+                f'.a{{color:#3b82f6;font-size:13px;text-decoration:none}}</style></head><body>'
+                f'<div class="c">{body}</div></body></html>')
+
+    if state == "done":
+        return card('<h1>✅ Logged in</h1>'
+                    f'<div class="ok">{info}</div>'
+                    '<p>Go back to <a class="a" href="/">/</a> to watch progress.</p>')
+    if state == "code_sent":
+        body = ('<h1>📲 Enter the code</h1>'
+                f'<p>{info}</p>')
+        if err:
+            body += f'<div class="err">{err}</div>'
+        body += ('<form method="POST" action="/auth/code">'
+                 '<input name="code" inputmode="numeric" autocomplete="one-time-code" '
+                 'placeholder="5-digit code from Telegram" required>'
+                 '<button type="submit">Verify code</button></form>'
+                 '<p><a class="a" href="/auth?back=1">change phone number</a></p>')
+        return card(body)
+    if state == "need_password":
+        body = ('<h1>🔐 Cloud password</h1>'
+                f'<p>{info}</p>')
+        if err:
+            body += f'<div class="err">{err}</div>'
+        body += ('<form method="POST" action="/auth/password">'
+                 '<input name="password" type="password" placeholder="2FA cloud password" required>'
+                 '<button type="submit">Unlock</button></form>')
+        return card(body)
+    # idle — phone form
+    body = ('<h1>🔑 Login to Telegram</h1>'
+            '<p>Enter the phone number of your Telegram account (with country code, '
+            'e.g. <code>+213…</code>). Telegram will send you a login code — '
+            'enter it here. No password needed unless you have 2FA.</p>')
+    if err:
+        body += f'<div class="err">{err}</div>'
+    body += ('<form method="POST" action="/auth/phone">'
+             '<input name="phone" inputmode="tel" placeholder="+213542067735" required>'
+             '<button type="submit">Send code</button></form>'
+             '<p>After login the session is saved to this server — it survives '
+             'restarts, so you only do this once.</p>')
+    return card(body)
 
 
 HTML = r"""<!doctype html>
@@ -284,18 +465,81 @@ class H(BaseHTTPRequestHandler):
             self._send(200, json.dumps(payload))
         elif path == "/healthz":
             self._send(200, json.dumps({"ok": True}))
+        elif path == "/auth":
+            if "back" in self.path:          # "change phone number"
+                with _AUTH["lock"]:
+                    _AUTH.update(state="idle", error="", info="", client=None)
+            self._send(200, _auth_html(), "text/html; charset=utf-8")
         else:
             self._send(404, json.dumps({"error": "not found"}))
+
+    def do_POST(self):
+        path = self.path.split("?", 1)[0]
+        if not path.startswith("/auth/"):
+            self._send(404, json.dumps({"error": "not found"}))
+            return
+        try:
+            length = int(self.headers.get("Content-Length", 0) or 0)
+            form = urllib.parse.parse_qs(self.rfile.read(length).decode()) if length else {}
+            value = (form.get(path.split("/")[-1]) or [""])[0].strip()
+        except Exception:
+            self._send(400, json.dumps({"error": "bad request"}))
+            return
+
+        if path == "/auth/phone":
+            if not re.fullmatch(r"\+?\d{7,15}", value):
+                with _AUTH["lock"]:
+                    _AUTH.update(state="idle",
+                                 error="That doesn't look like a phone number — use country code + number, e.g. +213542067735",
+                                 info="")
+                self.send_response(303)
+                self.send_header("Location", "/auth")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            try:
+                _auth_run(_auth_send_code(value))
+            except Exception as e:
+                with _AUTH["lock"]:
+                    _AUTH.update(state="idle", error=f"Could not send code: {e}", info="")
+        elif path in ("/auth/code", "/auth/password"):
+            if not value:
+                with _AUTH["lock"]:
+                    _AUTH.update(error="Field is empty — enter the code/password and press the button")
+            else:
+                try:
+                    _auth_run(_auth_sign_in("code" if path == "/auth/code" else "password", value))
+                except Exception as e:
+                    with _AUTH["lock"]:
+                        _AUTH.update(error=f"{e}")
+        else:
+            self._send(404, json.dumps({"error": "not found"}))
+            return
+        # redirect back to the auth page (shows the new state)
+        self.send_response(303)
+        self.send_header("Location", "/auth")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
 
 def main():
     t = threading.Thread(target=_updater, daemon=True)
     t.start()
+    if EMBED_STATUS:
+        threading.Thread(target=_status_refresher, daemon=True).start()
+    # web login (phone → OTP) — enabled when Telegram credentials are present
+    if os.environ.get("TELEGRAM_API_ID") and os.environ.get("TELEGRAM_API_HASH"):
+        try:
+            import telethon  # noqa: F401
+            threading.Thread(target=_auth_loop_thread, daemon=True).start()
+            _log(f"web login enabled → /auth (session file: {SESSION_NAME}.session)")
+        except ImportError:
+            _log("telethon not installed — /auth disabled")
     # immediate first load so the page isn't empty on cold start
     _refresh_once()
     srv = ThreadingHTTPServer(("0.0.0.0", PORT), H)
     _log(f"dashboard on 0.0.0.0:{PORT} (mode={PROGRESS_FILE and 'local' or (GIT_REPO and 'git' or 'none')}, "
-         f"refresh={REFRESH:g}s)")
+         f"refresh={REFRESH:g}s, embed_status={EMBED_STATUS})")
     srv.serve_forever()
 
 

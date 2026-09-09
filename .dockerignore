@@ -1,0 +1,12 @@
+.git
+.gitignore
+data/
+logs/
+out/
+__pycache__/
+*.pyc
+.env
+*.session
+*.session-journal
+*.db-wal
+*.db-shm

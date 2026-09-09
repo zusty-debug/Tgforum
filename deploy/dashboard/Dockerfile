@@ -1,8 +1,10 @@
 FROM python:3.12-slim
-# git + ca-certs so the service can `git pull` private progress updates
+# git + ca-certs so the service can `git pull` private progress updates;
+# telethon powers the web login (/auth) in single-container mode.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends git ca-certificates \
- && rm -rf /var/lib/apt/lists/*
+ && rm -rf /var/lib/apt/lists/* \
+ && pip install --no-cache-dir telethon
 WORKDIR /app
 COPY app.py .
 ENV PORT=10000 REFRESH=30

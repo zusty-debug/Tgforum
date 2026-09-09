@@ -24,9 +24,21 @@ def env_credentials():
     return int(api_id), api_hash, session
 
 
+def session_target() -> str:
+    """Session NAME (file base; Telethon appends '.session').
+
+    Priority: explicit SESSION_FILE env → persistent-volume file on a PaaS
+    (survives restarts; created by the web login at /auth) → local default.
+    """
+    f = os.environ.get("SESSION_FILE", "").strip()
+    if f:
+        return f
+    return "/data/tg_sess" if os.path.isdir("/data") else "organizer_session"
+
+
 def build_client():
     api_id, api_hash, session = env_credentials()
-    sess = StringSession(session) if session else "organizer_session"
+    sess = StringSession(session) if session else session_target()
     client = TelegramClient(sess, api_id, api_hash, **DEVICE)
     # Surface every flood wait >5s as FloodWaitError to our retry/pacer
     # layer (telethon's default auto-sleeps waits <60s and hides them).
