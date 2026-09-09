@@ -215,7 +215,7 @@ async def _auth_sign_in(step: str, value: str):
             await client.sign_in_password(value)
         me = await client.get_me()
         await _auth_mark_finished(client, me.first_name or str(me.id))
-    except terrors.PasswordHashInvalid:
+    except terrors.PasswordHashInvalidError:
         if step == "code":
             with _AUTH["lock"]:
                 _AUTH.update(state="need_password", error="",
@@ -223,10 +223,10 @@ async def _auth_sign_in(step: str, value: str):
         else:
             with _AUTH["lock"]:
                 _AUTH.update(state="need_password", error="Wrong cloud password — try again")
-    except terrors.PhoneCodeInvalid:
+    except terrors.PhoneCodeInvalidError:
         with _AUTH["lock"]:
             _AUTH.update(state="code_sent", error="That code wasn't right — enter the latest code Telegram sent")
-    except terrors.PhoneCodeEmpty:
+    except terrors.PhoneCodeEmptyError:
         with _AUTH["lock"]:
             _AUTH.update(state="code_sent", error="Code field was empty — enter the 5-digit code")
     except terrors.FloodWaitError as e:
