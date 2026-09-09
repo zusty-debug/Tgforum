@@ -31,8 +31,13 @@ except Exception:
 git commit -q -m "progress: $note"
 
 if [ -n "${GIT_PUSH_URL:-}" ]; then
-  git push -q "$GIT_PUSH_URL" HEAD
+  TARGET="$GIT_PUSH_URL"
 else
-  git push -q origin HEAD
+  TARGET="origin"
+fi
+if ! git push -q "$TARGET" HEAD 2>/dev/null; then
+  # someone else pushed first (or history diverged) — rebase and retry once
+  git pull --rebase -q "$TARGET" main 2>/dev/null || true
+  git push -q "$TARGET" HEAD || echo "push failed (will retry next minute)"
 fi
 echo "pushed: $note"
