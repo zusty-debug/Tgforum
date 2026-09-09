@@ -320,3 +320,70 @@ class DB:
         rows = self.conn.execute(
             f"SELECT {col} k, COUNT(*) c FROM {table} GROUP BY {col}").fetchall()
         return {r["k"]: r["c"] for r in rows}
+
+    # ── streaming sync queue (low-memory mode) ──────────────────
+    def build_sync_queue(self, views: list[dict]) -> tuple[int, int]:
+        """Persist the plan's views as a work queue (id = plan order).
+
+        Run offline (`main.py plan-queue`) in a roomy environment; the
+        container then only ever holds ONE view at a time.
+        """
+        with self.transaction():
+            self.conn.execute("DELETE FROM sync_queue_members")
+            self.conn.execute("DELETE FROM sync_queue")
+            try:
+                self.conn.execute(
+                    "DELETE FROM sqlite_sequence WHERE name IN "
+                    "('sync_queue', 'sync_queue_members')")
+            except sqlite3.OperationalError:
+                pass
+            n_m = 0
+            for i, v in enumerate(views, start=1):
+                cur = self.conn.execute(
+                    "INSERT INTO sync_queue(id, sort_key, gid, name, confidence,"
+                    " topic_title, kind, summary, to_saved, review_reason, marker)"
+                    " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (i, int(v["sort_key"]), int(v["gid"]), v.get("name"),
+                     v.get("confidence"), v.get("topic_title"), v.get("kind"),
+                     v.get("summary"), int(bool(v.get("to_saved"))),
+                     v.get("review_reason"), v.get("marker")))
+                qid = cur.lastrowid
+                for j, m in enumerate(v["members"]):
+                    self.conn.execute(
+                        "INSERT INTO sync_queue_members"
+                        "(queue_id, seq, msg_id, file_id) VALUES (?,?,?,?)",
+                        (qid, j, int(m["msg_id"]), m.get("file_id")))
+                    n_m += 1
+        return len(views), n_m
+
+    def queue_count(self) -> int:
+        try:
+            return int(self.conn.execute(
+                "SELECT COUNT(*) c FROM sync_queue").fetchone()["c"])
+        except sqlite3.OperationalError:
+            return 0
+
+    def iter_sync_views(self):
+        """Stream plan views one at a time — O(1) memory, plan order."""
+        for r in self.conn.execute("SELECT * FROM sync_queue ORDER BY id"):
+            members = [
+                {"msg_id": mr["msg_id"], "file_id": mr["file_id"]}
+                for mr in self.conn.execute(
+                    "SELECT msg_id, file_id FROM sync_queue_members"
+                    " WHERE queue_id=? ORDER BY seq", (r["id"],))
+            ]
+            yield {
+                "id": r["id"], "sort_key": r["sort_key"], "gid": r["gid"],
+                "name": r["name"], "confidence": r["confidence"],
+                "topic_title": r["topic_title"], "kind": r["kind"],
+                "summary": r["summary"], "to_saved": bool(r["to_saved"]),
+                "review_reason": r["review_reason"], "marker": r["marker"],
+                "members": members,
+            }
+
+    def queue_msg_ids(self) -> list[int]:
+        """Numeric msg_ids for batch prefetch — a few MB of ints, no views."""
+        rows = self.conn.execute(
+            "SELECT DISTINCT msg_id FROM sync_queue_members"
+            " WHERE file_id GLOB '[0-9]*' ORDER BY 1")
+        return [r["msg_id"] for r in rows]

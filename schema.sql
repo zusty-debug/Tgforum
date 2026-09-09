@@ -119,3 +119,31 @@ CREATE TABLE IF NOT EXISTS settings(
   key   TEXT PRIMARY KEY,
   value TEXT
 );
+
+-- ── streaming sync queue (low-memory mode) ─────────────────────────
+-- The plan (78k views) is persisted once (offline `plan-queue`) so the
+-- sync worker can stream it one group at a time instead of holding ~200MB
+-- of view dicts in RAM. Required for 0.15 GB containers.
+CREATE TABLE IF NOT EXISTS sync_queue(
+  id             INTEGER PRIMARY KEY,   -- plan order (1-based)
+  sort_key       INTEGER NOT NULL,
+  gid            INTEGER NOT NULL,      -- logical_groups.id
+  name           TEXT,
+  confidence     REAL,
+  topic_title    TEXT,
+  kind           TEXT,
+  summary        TEXT,
+  to_saved       INTEGER NOT NULL DEFAULT 0,
+  review_reason  TEXT,
+  marker         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_queue_gid ON sync_queue(gid);
+
+CREATE TABLE IF NOT EXISTS sync_queue_members(
+  queue_id  INTEGER NOT NULL REFERENCES sync_queue(id) ON DELETE CASCADE,
+  seq       INTEGER NOT NULL,
+  msg_id    INTEGER NOT NULL,
+  file_id   TEXT,
+  PRIMARY KEY (queue_id, seq)
+);
+CREATE INDEX IF NOT EXISTS idx_qm_msg ON sync_queue_members(msg_id);

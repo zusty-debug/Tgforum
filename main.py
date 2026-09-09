@@ -119,6 +119,21 @@ async def cmd_scan(cfg: dict, db: DB) -> int:
 
 
 def _prepare_views(cfg: dict, db: DB, archives: list[dict]):
+    """Return the plan for sync.
+
+    If the low-memory `sync_queue` table is populated (via
+    `python main.py plan-queue`), return a FACTORY callable that yields a
+    fresh one-row-at-a-time generator — the worker then holds a single
+    view in RAM instead of all 78k (~200MB). Otherwise fall back to the
+    legacy in-memory plan.
+    """
+    if db.queue_count() > 0:
+        print(f"  sync queue present ({db.queue_count():,} views) — "
+              f"STREAMING mode (low memory)")
+
+        def make_views():
+            return db.iter_sync_views()
+        return make_views
     groups = db.load_groups_full()
     if not groups:
         print("Nothing classified — run `python main.py classify` first")
@@ -156,12 +171,25 @@ async def _sync_archives(cfg: dict, db: DB, archives: list[dict],
     print(f"  global pacing: 1 Telegram op per {gap:g}s (account-wide), "
           f"auto-raises on long flood waits")
 
+    # Streaming mode: `views` is a factory → one fresh generator per
+    # archive (each consumes the queue independently); prefetch seed is
+    # built once from the queue table (ints only, a few MB).
+    streaming = not isinstance(views, list)
+    stream_ids = db.queue_msg_ids() if streaming else None
+
     async def one(a):
         info = await verify_forum_permissions(client, a["chat_id"])
         print(f"✔ {info['title']} — forum OK, manage-topics OK")
-        local_views = [dict(v, members=[dict(m) for m in v["members"]]) for v in views]
+        views_obj = views() if streaming else views
+        if isinstance(views_obj, list):
+            # parallel archives share one plan → deep-copy for isolation
+            local_views = [dict(v, members=[dict(m) for m in v["members"]])
+                           for v in views_obj]
+        else:
+            # each archive gets its own generator → already isolated
+            local_views = views_obj
         return await run_archive(client, db, cfg, local_views, a, limit,
-                                 pacer=pacer)
+                                 pacer=pacer, prefetch_ids=stream_ids)
 
     try:
         if len(targets) == 1 or not parallel:
@@ -328,6 +356,24 @@ def cmd_rebuild_index(cfg: dict, db: DB, archives: list[dict]) -> int:
     return 0
 
 
+def cmd_plan_queue(cfg: dict, db: DB, archives: list[dict]) -> int:
+    groups = db.load_groups_full()
+    if not groups:
+        print("Nothing classified — run `python main.py classify` first")
+        return 1
+    dup_of = db.load_dedup()
+    planner = Planner(cfg, archives)
+    id_map = {id(g): g._db_id for g in groups}  # type: ignore[attr-defined]
+    plan = planner.plan(groups, id_map, dup_of)
+    views = build_group_views(groups, plan)
+    n_v, n_m = db.build_sync_queue(views)
+    print(f"✔ sync queue built: {n_v:,} views, {n_m:,} member refs")
+    print("  sync now streams this queue one group at a time "
+          f"(~{os.path.getsize(db.path) / 1e6:,.0f} MB DB) — safe for "
+          "0.15 GB containers.")
+    return 0
+
+
 def cmd_status(cfg: dict, db: DB, archives: list[dict]) -> int:
     print(f"Source files in DB: {db.count_source():,}")
     print(f"Logical groups:     {dict(db.counts('logical_groups', 'status')) or '—'}")
@@ -349,6 +395,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("scan")
     sub.add_parser("classify")
     sub.add_parser("dry-run")
+    sub.add_parser("plan-queue",
+                   help="persist the plan into the low-memory sync_queue "
+                        "(run offline; enables streaming sync for small "
+                        "containers)")
     p = sub.add_parser("review")
     p.add_argument("--limit", type=int, default=50)
     p = sub.add_parser("approve")
@@ -386,6 +436,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_classify(cfg, db, archives)
         if args.cmd == "dry-run":
             return cmd_dry_run(cfg, db, archives)
+        if args.cmd == "plan-queue":
+            return cmd_plan_queue(cfg, db, archives)
         if args.cmd == "review":
             return cmd_review(cfg, db, args.limit)
         if args.cmd == "approve":

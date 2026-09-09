@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import bisect
+import itertools
 import logging
 import os
 import time
@@ -51,13 +52,22 @@ _prefetch_lock: asyncio.Lock | None = None
 _INF = 10**18
 
 
-def seed_prefetch(views: list[dict]) -> int:
-    """Fill the batch list with all uncached numeric msg_ids (sorted)."""
+def seed_prefetch(source) -> int:
+    """Fill the batch list with all uncached numeric msg_ids (sorted).
+
+    `source` is either a list of view dicts (legacy in-memory plan) or a
+    list of msg_ids straight from the sync_queue table (streaming mode —
+    a few MB of ints instead of ~200MB of views).
+    """
     global _prefetch_lock
     if _prefetch["ids"] is None:
-        ids = sorted({m["msg_id"] for v in views for m in v["members"]
-                      if m["file_id"] and m["file_id"].isdigit()
-                      and m["msg_id"] not in resolve_cache})
+        if isinstance(source, list) and source and isinstance(source[0], int):
+            ids = [i for i in source if i not in resolve_cache]
+        else:
+            ids = [m["msg_id"] for v in source for m in v["members"]
+                   if m["file_id"] and m["file_id"].isdigit()
+                   and m["msg_id"] not in resolve_cache]
+        ids = sorted(set(ids))
         _prefetch["ids"] = ids
         _prefetch["pos"] = 0
         _prefetch["up_to"] = (ids[0] - 1) if ids else _INF
@@ -310,12 +320,18 @@ class GlobalPacer:
 
 
 class SyncWorker:
-    def __init__(self, client, db, cfg, views: list[dict], archive: dict,
-                 limit: int | None = None, pacer: GlobalPacer | None = None):
+    def __init__(self, client, db, cfg, views, archive: dict,
+                 limit: int | None = None, pacer: GlobalPacer | None = None,
+                 prefetch_ids: list[int] | None = None):
         self.client = client
         self.db = db
         self.cfg = cfg or {}
-        self.views = views[:limit] if limit else views
+        # `views` may be a list (legacy in-memory plan) or a one-shot
+        # generator over sync_queue (streaming, O(1) memory). The limit
+        # slice is applied by run_archive — never here (slicing a
+        # generator would consume it).
+        self.views = views
+        self.prefetch_ids = prefetch_ids
         self.archive = archive
         self.pacer = pacer
         self.proc = self.cfg.get("processing", {})
@@ -359,9 +375,18 @@ class SyncWorker:
 
     # ── main loop ───────────────────────────────────────────────
     async def run(self):
-        log.info("[%s] starting sync of %d groups → %s",
-                 self.archive["id"], len(self.views), self.archive["chat_id"])
-        n = seed_prefetch(self.views)
+        n_views = (len(self.views) if isinstance(self.views, list)
+                   else "streamed-queue")
+        log.info("[%s] starting sync of %s groups → %s",
+                 self.archive["id"], n_views, self.archive["chat_id"])
+        if isinstance(self.views, list):
+            seed_src = self.views
+        else:
+            # streaming: seed from DB ids (ints only) — the views
+            # generator must stay unconsumed for the main loop
+            seed_src = (self.prefetch_ids
+                        if self.prefetch_ids is not None else [])
+        n = seed_prefetch(seed_src)
         if n:
             log.info("[%s] batch prefetch armed for %d source messages",
                      self.archive["id"], n)
@@ -523,7 +548,12 @@ class SyncWorker:
 
 
 async def run_archive(client, db, cfg, views, archive, limit=None,
-                      pacer: GlobalPacer | None = None):
-    worker = SyncWorker(client, db, cfg, views, archive, limit, pacer=pacer)
+                      pacer: GlobalPacer | None = None,
+                      prefetch_ids: list[int] | None = None):
+    if limit:
+        views = (views[:limit] if isinstance(views, list)
+                 else itertools.islice(views, limit))
+    worker = SyncWorker(client, db, cfg, views, archive, limit,
+                        pacer=pacer, prefetch_ids=prefetch_ids)
     await worker.run()
     return worker.done, worker.failed
