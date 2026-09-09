@@ -70,6 +70,14 @@ if up "scripts/push_loo[p].sh"; then :; else
   fi
 fi
 
+# live dashboard → http://0.0.0.0:${PORT:-8080} (local mode: tails progress.json)
+if up "deploy/dashboard/app.p[y]"; then :; else
+  ( setsid nohup env PROGRESS_FILE="$(pwd)/out/progress.json" \
+      PORT="${PORT:-8080}" \
+      python3 -u deploy/dashboard/app.py >> logs/dashboard_web.log 2>&1 & )
+  echo "── live dashboard started on 0.0.0.0:${PORT:-8080} (expose this port) ──"
+fi
+
 # ── 3. The pipeline (foreground — platform sees its logs) ──────────────────
 echo "── scan (incremental) ─────────────────────────────"
 python main.py scan
