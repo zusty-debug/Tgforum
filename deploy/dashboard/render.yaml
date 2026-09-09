@@ -1,0 +1,25 @@
+# Deploy this as a WEB service (needs a public URL).
+#
+# IMPORTANT: set autoDeploy to false. The dashboard is deployed ONCE and then
+# refreshes progress itself by `git pull`-ing progress.json every REFRESH
+# seconds. If auto-deploy stayed on, every progress push would trigger a
+# full rebuild.
+#
+# Fill GIT_REPO + GIT_TOKEN in the Render dashboard (never commit them).
+services:
+  - type: web
+    name: archive-dashboard
+    runtime: docker
+    rootDir: deploy/dashboard
+    plan: free
+    autoDeploy: false
+    healthCheckPath: /healthz
+    envVars:
+      - key: REFRESH
+        value: "30"
+      - key: GIT_BRANCH
+        value: main
+      - key: GIT_REPO
+        sync: false            # e.g. https://github.com/you/repo  (no token)
+      - key: GIT_TOKEN
+        sync: false            # a token with READ access to the repo

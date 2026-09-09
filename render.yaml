@@ -1,0 +1,32 @@
+services:
+  - type: worker            # no web traffic needed — it talks to Telegram
+    name: telegram-archive-organizer
+    runtime: python
+    plan: starter           # 512MB RAM is enough (streaming + SQLite)
+    region: frankfurt
+    buildCommand: pip install -r requirements.txt
+    startCommand: bash start.sh
+    disk:
+      name: archive-data    # persistent disk for the SQLite DB
+      size: 10GB
+      mountPath: /data
+    envVars:
+      - key: DB_PATH
+        value: /data/archive.db
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      # Fill the values in the Render dashboard (never commit secrets):
+      - key: TELEGRAM_API_ID
+        generateValue: true
+      - key: TELEGRAM_API_HASH
+        generateValue: true
+      - key: TELEGRAM_STRING_SESSION
+        generateValue: true
+      - key: SOURCE_CHAT_ID
+        generateValue: true
+      - key: ARCHIVE_1_CHAT_ID
+        generateValue: true
+      - key: ARCHIVE_2_CHAT_ID
+        generateValue: true
+      - key: ARCHIVE_3_CHAT_ID
+        generateValue: true

@@ -1,0 +1,131 @@
+# ═════════════════════════════════════════════════════════════════
+# Telegram Archive Organizer — configuration
+# Chat IDs come from .env (TELEGRAM_*, SOURCE_CHAT_ID, ARCHIVE_*_CHAT_ID).
+# ═════════════════════════════════════════════════════════════════
+
+classification:
+  # Group confidence >= auto → automatic group.
+  # review <= score < auto   → provisional group, flagged for review.
+  # < review                 → files stay separate.
+  auto_group_threshold: 0.90
+  review_threshold: 0.65
+  # Tokens appearing in more files than this are ignored for candidate
+  # discovery (prevents explosion on very common words).
+  max_token_doc_frequency: 300
+  # Message-ID window for the "neighborhood" signal.
+  neighborhood_window_messages: 15
+
+country:
+  # Confidence needed for a single-file topic to be named after a country.
+  topic_confidence: 0.75
+
+organization:
+  ulp_topic_name: "ULPs"
+  # A file is ULP material if any of these tokens appear in its filename.
+  ulp_keywords: ["ulp"]
+  unknown_country_name: "UNKNOWN"
+  miscellaneous_topic: "Miscellaneous"
+  review_topic_name: "Review"
+  quarantine_topic_name: "Quarantine"
+  # Where files with no confident destination go (review flow):
+  #   topic        → copied into the Review topic of each forum
+  #   saved        → copied to your Saved Messages + listed in CLI
+  #   hold         → copied nowhere until `python main.py approve`
+  review_destination: saved
+  topic_title_max_chars: 120
+  # Dataset-topic cap: every multi-part dataset gets its own topic until
+  # this cap; the rest (smallest first) go into numbered "Extra Datasets N"
+  # topics. 0 = unlimited.
+  max_topics_per_forum: 6000
+  # How many datasets per overflow topic.
+  overflow_topic_capacity: 50
+  summary_in_ulp_topic: false
+  # Services/brands recognized for single-file domain topics.
+  # (Dotted domain tokens like "eda.yandex.ru" work even without this list.)
+  known_services:
+    - facebook
+    - yandex
+    - google
+    - amazon
+    - microsoft
+    - apple
+    - udemy
+    - coursera
+    - netflix
+    - spotify
+    - instagram
+    - whatsapp
+    - telegram
+    - github
+    - linkedin
+    - pinterest
+    - ebay
+    - samsung
+    - nokia
+    - sony
+    - lenovo
+    - dell
+    - adobe
+    - oracle
+    - sap
+    - vmware
+    - nvidia
+    - intel
+    - cisco
+    - toshiba
+    - philips
+    - bosch
+    - siemens
+    - toyota
+    - honda
+    - nissan
+    - tesla
+    - hyundai
+    - mercedes
+    - bmw
+    - audi
+    - volvo
+
+quarantine:
+  # Safety net: files whose names match these patterns are NEVER auto-
+  # redistributed; they go to the Quarantine topic (or are skipped).
+  mode: quarantine_topic        # quarantine_topic | skip_only
+  patterns:
+    - credential
+    - credentials
+    - password
+    - passwd
+    - breach
+    - breached
+    - leak
+    - leaked
+    - dox
+    - doxx
+    - pwned
+    - fullz
+    - card data
+    - cc dump
+    - pii
+    - auth dump
+    - session token
+    - wallet dump
+    - iban dump
+
+processing:
+  scan_commit_every: 200        # rows per DB commit during scan
+  sync_delay_seconds: 1.2       # pacing between sends, per archive
+  global_copy_gap_seconds: 1.5  # shared account-wide pacing (all archives)
+  max_parallel_archives: 3      # archives synced concurrently
+  max_retries: 5
+  backoff_base_seconds: 5
+  backoff_max_seconds: 300
+
+index:
+  output_dir: ./out
+  # true  → single self-contained index.html (data inlined, bigger file)
+  # false → index.html + data.json (recommended for ~90k filenames)
+  single_file_html: false
+
+logging:
+  dir: ./logs
+  level: INFO

@@ -1,0 +1,27 @@
+# secrets — never commit
+.env
+*.session
+*.session-journal
+
+# local state (but keep the resume artifacts)
+data/*
+!data/archive.db
+logs/
+out/*
+!out/progress.json
+*.db-wal
+*.db-shm
+
+# python
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# deploy
+render.yaml.local
